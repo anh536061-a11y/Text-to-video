@@ -18,6 +18,21 @@ import zhErrors from './zh/errors';
 import zhTemplates from './zh/templates';
 import zhAssets from './zh/assets';
 
+import viCommon from './vi/common';
+import viAuth from './vi/auth';
+import viDashboard from './vi/dashboard';
+import viErrors from './vi/errors';
+import viTemplates from './vi/templates';
+import viAssets from './vi/assets';
+
+export const SUPPORTED_LANGUAGES = [
+  { code: 'zh', label: '中文' },
+  { code: 'en', label: 'English' },
+  { code: 'vi', label: 'Tiếng Việt' },
+] as const;
+
+export type SupportedLanguageCode = (typeof SUPPORTED_LANGUAGES)[number]['code'];
+
 const resources = {
   en: {
     common: enCommon,
@@ -34,6 +49,14 @@ const resources = {
     errors: zhErrors,
     templates: zhTemplates,
     assets: zhAssets,
+  },
+  vi: {
+    common: viCommon,
+    auth: viAuth,
+    dashboard: viDashboard,
+    errors: viErrors,
+    templates: viTemplates,
+    assets: viAssets,
   },
 };
 

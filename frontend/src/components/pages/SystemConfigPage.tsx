@@ -4,6 +4,7 @@ import { Link, useLocation, useSearch } from "wouter";
 import { AlertTriangle, BarChart3, Bot, ChevronLeft, Film, Info, KeyRound, Languages, Plug } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useConfigStatusStore } from "@/stores/config-status-store";
+import { SUPPORTED_LANGUAGES } from "@/i18n";
 import { AgentConfigTab } from "./AgentConfigTab";
 import { ApiKeysTab } from "./ApiKeysTab";
 import { AboutSection } from "./settings/AboutSection";
@@ -112,15 +113,23 @@ export function SystemConfigPage() {
             );
           })}
 
-          {/* Language toggle */}
+          {/* Language toggle — cycles through SUPPORTED_LANGUAGES (zh → en → vi → ...). */}
           <div className="my-3 mx-4 border-t border-gray-800" />
           <button
             type="button"
             onClick={() => {
-              const nextLang = i18n.language.startsWith("zh") ? "en" : "zh";
+              const codes = SUPPORTED_LANGUAGES.map((l) => l.code);
+              const current = i18n.language.split("-")[0];
+              const idx = codes.indexOf(current as (typeof codes)[number]);
+              const nextLang = codes[(idx + 1) % codes.length] ?? codes[0];
               void i18n.changeLanguage(nextLang);
             }}
             className="flex w-full items-center gap-3 px-4 py-2.5 text-sm border-l-2 border-transparent text-gray-400 hover:bg-gray-800/30 hover:text-gray-200 transition-colors focus-ring focus-visible:ring-inset"
+            aria-label={t("dashboard:language_setting")}
+            title={
+              SUPPORTED_LANGUAGES.find((l) => l.code === i18n.language.split("-")[0])?.label ??
+              i18n.language
+            }
           >
             <Languages className="h-4 w-4" />
             <span className="flex-1 text-left">{t("dashboard:language_setting")}</span>
