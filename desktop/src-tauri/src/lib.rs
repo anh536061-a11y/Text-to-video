@@ -145,7 +145,7 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             let state = handle.state::<BackendProcess>();
-            match spawn_backend(&handle) {
+            let spawn_error: Option<String> = match spawn_backend(&handle) {
                 Ok(child) => {
                     log::info!(
                         "Backend spawned (pid={}); waiting for {}:{}",
@@ -154,18 +154,22 @@ pub fn run() {
                         BACKEND_PORT
                     );
                     *state.0.lock().unwrap() = Some(child);
+                    None
                 }
                 Err(err) => {
                     log::error!("Failed to spawn backend: {err}");
+                    Some(err.to_string())
                 }
-            }
+            };
 
             let main_window = handle
                 .get_webview_window("main")
                 .expect("main window missing");
             let window_for_thread = main_window.clone();
             thread::spawn(move || {
-                let ready = wait_for_backend();
+                // If the backend process never started, skip the 120s health
+                // check entirely and go straight to the error UI.
+                let ready = spawn_error.is_none() && wait_for_backend();
                 if ready {
                     // Backend is up. Navigate from the bundled placeholder
                     // (loading spinner) to the live FastAPI app.
@@ -175,15 +179,21 @@ pub fn run() {
                         serde_json::to_string(&target).unwrap_or_else(|_| format!("\"{}\"", target))
                     ));
                 } else {
-                    log::error!(
-                        "Backend did not become ready within {}s",
-                        HEALTH_CHECK_TIMEOUT_SECS
-                    );
+                    let detail = match &spawn_error {
+                        Some(msg) => format!("Backend process could not be started: {msg}"),
+                        None => format!(
+                            "The Python backend did not respond within {}s. Please close this window, reopen ArcReel, and if the problem persists report it with the install path.",
+                            HEALTH_CHECK_TIMEOUT_SECS
+                        ),
+                    };
+                    log::error!("{}", detail);
+                    let detail_json = serde_json::to_string(&detail)
+                        .unwrap_or_else(|_| "\"Backend failed to start.\"".to_string());
                     // Replace the spinner with an error message so the user
                     // gets actionable info instead of WebView2's
                     // connection-refused page.
-                    let _ = window_for_thread.eval(
-                        r#"(function(){
+                    let _ = window_for_thread.eval(&format!(
+                        r#"(function(){{
   var center = document.querySelector('.center');
   if (!center) return;
   center.innerHTML = '';
@@ -198,11 +208,12 @@ pub fn run() {
   p.style.fontSize = '13px';
   p.style.lineHeight = '1.5';
   p.style.color = '#94a3b8';
-  p.textContent = 'The Python backend did not become ready within the timeout. Please close this window, reopen ArcReel, and if the problem persists, report it with the install path.';
+  p.textContent = {};
   center.appendChild(h);
   center.appendChild(p);
-})();"#,
-                    );
+}})();"#,
+                        detail_json
+                    ));
                 }
                 let _ = window_for_thread.show();
                 let _ = window_for_thread.set_focus();
