@@ -166,24 +166,44 @@ pub fn run() {
             let window_for_thread = main_window.clone();
             thread::spawn(move || {
                 let ready = wait_for_backend();
-                if !ready {
+                if ready {
+                    // Backend is up. Navigate from the bundled placeholder
+                    // (loading spinner) to the live FastAPI app.
+                    let target = format!("http://{}:{}/", BACKEND_HOST, BACKEND_PORT);
+                    let _ = window_for_thread.eval(&format!(
+                        "window.location.replace({});",
+                        serde_json::to_string(&target).unwrap_or_else(|_| format!("\"{}\"", target))
+                    ));
+                } else {
                     log::error!(
                         "Backend did not become ready within {}s",
                         HEALTH_CHECK_TIMEOUT_SECS
                     );
+                    // Replace the spinner with an error message so the user
+                    // gets actionable info instead of WebView2's
+                    // connection-refused page.
+                    let _ = window_for_thread.eval(
+                        r#"(function(){
+  var center = document.querySelector('.center');
+  if (!center) return;
+  center.innerHTML = '';
+  var h = document.createElement('div');
+  h.style.fontSize = '18px';
+  h.style.fontWeight = '600';
+  h.style.marginBottom = '8px';
+  h.textContent = 'ArcReel backend failed to start';
+  var p = document.createElement('div');
+  p.style.maxWidth = '480px';
+  p.style.textAlign = 'center';
+  p.style.fontSize = '13px';
+  p.style.lineHeight = '1.5';
+  p.style.color = '#94a3b8';
+  p.textContent = 'The Python backend did not become ready within the timeout. Please close this window, reopen ArcReel, and if the problem persists, report it with the install path.';
+  center.appendChild(h);
+  center.appendChild(p);
+})();"#,
+                    );
                 }
-                // The window initially loads the bundled placeholder (a loading
-                // screen). Once the backend is up, navigate to it. Using eval
-                // works regardless of whether navigation succeeds, because the
-                // placeholder document is always reachable via tauri:// asset.
-                let target = format!(
-                    "http://{}:{}/",
-                    BACKEND_HOST, BACKEND_PORT
-                );
-                let _ = window_for_thread.eval(&format!(
-                    "window.location.replace({});",
-                    serde_json::to_string(&target).unwrap_or_else(|_| format!("\"{}\"", target))
-                ));
                 let _ = window_for_thread.show();
                 let _ = window_for_thread.set_focus();
             });

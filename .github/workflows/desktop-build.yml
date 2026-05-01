@@ -60,7 +60,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             desktop/src-tauri/target
-          key: ${{ runner.os }}-cargo-tauri-${{ hashFiles('desktop/src-tauri/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-tauri-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-tauri-
 
