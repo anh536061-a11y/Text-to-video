@@ -1,3 +1,4 @@
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -77,6 +78,26 @@ fn spawn_backend(handle: &tauri::AppHandle) -> std::io::Result<Child> {
         existing_path
     );
 
+    // Redirect stdout+stderr to <app_dir>/backend.log so the user can inspect
+    // backend output (including the auto-generated AUTH_PASSWORD warning the
+    // first time .env has an empty password) and crash diagnostics.
+    let log_path = app_dir.join("backend.log");
+    let (stdout_target, stderr_target) = match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .and_then(|f| f.try_clone().map(|f2| (f, f2)))
+    {
+        Ok((f, f2)) => (Stdio::from(f), Stdio::from(f2)),
+        Err(err) => {
+            log::warn!(
+                "Failed to open backend log file at {}: {err}; falling back to /dev/null",
+                log_path.display()
+            );
+            (Stdio::null(), Stdio::null())
+        }
+    };
+
     let mut cmd = Command::new(&python_exe);
     cmd.current_dir(&app_dir)
         .arg("-m")
@@ -90,8 +111,8 @@ fn spawn_backend(handle: &tauri::AppHandle) -> std::io::Result<Child> {
         .env("PATH", &new_path)
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONUNBUFFERED", "1")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(stdout_target)
+        .stderr(stderr_target);
 
     #[cfg(target_os = "windows")]
     {
@@ -180,9 +201,11 @@ pub fn run() {
                     ));
                 } else {
                     let detail = match &spawn_error {
-                        Some(msg) => format!("Backend process could not be started: {msg}"),
+                        Some(msg) => format!(
+                            "Backend process could not be started: {msg}. Check backend.log inside the install directory for details."
+                        ),
                         None => format!(
-                            "The Python backend did not respond within {}s. Please close this window, reopen ArcReel, and if the problem persists report it with the install path.",
+                            "The Python backend did not respond within {}s. Check backend.log inside the install directory for details, then reopen ArcReel.",
                             HEALTH_CHECK_TIMEOUT_SECS
                         ),
                     };
