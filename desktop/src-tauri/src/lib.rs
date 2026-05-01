@@ -172,6 +172,18 @@ pub fn run() {
                         HEALTH_CHECK_TIMEOUT_SECS
                     );
                 }
+                // The window initially loads the bundled placeholder (a loading
+                // screen). Once the backend is up, navigate to it. Using eval
+                // works regardless of whether navigation succeeds, because the
+                // placeholder document is always reachable via tauri:// asset.
+                let target = format!(
+                    "http://{}:{}/",
+                    BACKEND_HOST, BACKEND_PORT
+                );
+                let _ = window_for_thread.eval(&format!(
+                    "window.location.replace({});",
+                    serde_json::to_string(&target).unwrap_or_else(|_| format!("\"{}\"", target))
+                ));
                 let _ = window_for_thread.show();
                 let _ = window_for_thread.set_focus();
             });
@@ -196,11 +208,15 @@ pub fn run() {
 
 fn kill_backend(app_handle: &tauri::AppHandle) {
     let state = app_handle.state::<BackendProcess>();
-    if let Ok(mut guard) = state.0.lock() {
-        if let Some(mut child) = guard.take() {
-            log::info!("Killing backend pid={}", child.id());
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+    // Bind the guard to a named local so its lifetime is clearly the function
+    // body (avoids edition-2024 temporary-drop-order issue with `if let` chains).
+    let mut guard = match state.0.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(mut child) = guard.take() {
+        log::info!("Killing backend pid={}", child.id());
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

@@ -17,7 +17,7 @@
         "height": 800,
         "minWidth": 900,
         "minHeight": 600,
-        "url": "http://127.0.0.1:1241/",
+        "url": "index.html",
         "visible": false,
         "decorations": true
       }
