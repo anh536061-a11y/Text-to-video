@@ -1,0 +1,15 @@
+{
+  "name": "arcreel-desktop",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Tauri desktop shell for ArcReel that spawns the bundled FastAPI backend.",
+  "scripts": {
+    "tauri": "tauri",
+    "build": "tauri build",
+    "dev": "tauri dev"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0"
+  },
+  "packageManager": "pnpm@9.15.1"
+}

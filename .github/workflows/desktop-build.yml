@@ -1,0 +1,119 @@
+name: Desktop build (Windows)
+
+on:
+  push:
+    branches:
+      - "**"
+    paths:
+      - "desktop/**"
+      - ".github/workflows/desktop-build.yml"
+      - "frontend/**"
+      - "server/**"
+      - "lib/**"
+      - "alembic/**"
+      - "alembic.ini"
+      - "pyproject.toml"
+      - "uv.lock"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # ---------------------------------------------------------------
+      # Toolchains
+      # ---------------------------------------------------------------
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/src-tauri/target
+          key: ${{ runner.os }}-cargo-tauri-${{ hashFiles('desktop/src-tauri/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-tauri-
+
+      - name: Install desktop CLI deps (Tauri CLI)
+        working-directory: desktop
+        run: pnpm install --no-frozen-lockfile
+
+      # ---------------------------------------------------------------
+      # Build frontend (uvicorn serves it via SPAStaticFiles)
+      # ---------------------------------------------------------------
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm build
+
+      # ---------------------------------------------------------------
+      # Prepare bundled resources (venv + app source + ffmpeg)
+      # ---------------------------------------------------------------
+      - name: Prepare desktop resources
+        shell: pwsh
+        run: pwsh desktop/scripts/prepare-resources.ps1
+
+      # ---------------------------------------------------------------
+      # Tauri build
+      # ---------------------------------------------------------------
+      - name: Tauri build (NSIS installer)
+        working-directory: desktop
+        run: pnpm exec tauri build --bundles nsis
+
+      # ---------------------------------------------------------------
+      # Upload artifact
+      # ---------------------------------------------------------------
+      - name: Collect installer
+        shell: pwsh
+        run: |
+          $bundleDir = "desktop/src-tauri/target/release/bundle"
+          if (-not (Test-Path $bundleDir)) {
+            Get-ChildItem desktop/src-tauri/target/release -Recurse | Select-Object -First 50 FullName
+            throw "bundle dir not found at $bundleDir"
+          }
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Get-ChildItem -Recurse -Path $bundleDir -Include "*.exe", "*.msi" | ForEach-Object {
+            Copy-Item $_.FullName artifacts/
+          }
+          Get-ChildItem artifacts | Format-Table FullName, Length
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: arcreel-windows-installer
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30
