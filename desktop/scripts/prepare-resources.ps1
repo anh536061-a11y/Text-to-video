@@ -104,11 +104,20 @@ try {
 }
 
 Write-Step "Installing backend deps directly into portable Python"
-# Use the bundled Python's own pip; this populates <python>\Lib\site-packages
-# with all runtime deps. No venv launcher, no hardcoded paths.
-& $PythonExe -m pip install --no-cache-dir --no-warn-script-location --upgrade pip
+# uv-managed Python ships with a PEP 668 EXTERNALLY-MANAGED marker so end
+# users don't accidentally pollute it. Since we DO want to install packages
+# into this interpreter (it's our private bundled copy, not the user's
+# system Python), drop the marker file. Then use the bundled Python's own
+# pip to populate <python>\Lib\site-packages with all runtime deps. No
+# venv launcher, no hardcoded paths.
+$ExternallyManaged = Join-Path $PyDir "Lib\EXTERNALLY-MANAGED"
+if (Test-Path $ExternallyManaged) {
+    Write-Information "Removing PEP 668 EXTERNALLY-MANAGED marker so pip can install into bundled Python"
+    Remove-Item -Force $ExternallyManaged
+}
+& $PythonExe -m pip install --no-cache-dir --no-warn-script-location --break-system-packages --upgrade pip
 if ($LASTEXITCODE -ne 0) { throw "pip self-upgrade failed (exit $LASTEXITCODE)" }
-& $PythonExe -m pip install --no-cache-dir --no-warn-script-location -r $ReqFile
+& $PythonExe -m pip install --no-cache-dir --no-warn-script-location --break-system-packages -r $ReqFile
 if ($LASTEXITCODE -ne 0) { throw "pip install -r requirements failed (exit $LASTEXITCODE)" }
 
 # Drop unused junk from site-packages to shrink the bundle.
