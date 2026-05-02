@@ -114,6 +114,14 @@ fn spawn_backend(handle: &tauri::AppHandle) -> std::io::Result<Child> {
         .env("PATH", &new_path)
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONUNBUFFERED", "1")
+        // The bundled portable Python ships its own stdlib under <python>/Lib/.
+        // If the end user happens to have PYTHONHOME or PYTHONPATH set in
+        // their environment (common for Python developers), the inherited
+        // values would override ours and the interpreter would either fail
+        // to find its stdlib or pull in the user's site-packages and
+        // crash. Strip them.
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONPATH")
         .stdout(stdout_target)
         .stderr(stderr_target);
 
