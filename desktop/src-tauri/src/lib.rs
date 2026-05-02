@@ -135,15 +135,50 @@ fn spawn_backend(handle: &tauri::AppHandle) -> std::io::Result<Child> {
     cmd.spawn()
 }
 
-fn wait_for_backend() -> bool {
+/// Outcome of waiting for the backend to come up.
+enum BackendStartup {
+    /// Health check succeeded — TCP connect + valid HTTP response on /.
+    Ready,
+    /// The Python child exited (crashed) before the port came up.
+    Exited { code: Option<i32> },
+    /// The full timeout elapsed without the port responding and without the
+    /// child process exiting (e.g. wedged during startup).
+    Timeout,
+}
+
+/// Poll for the backend HTTP port. While polling, also check whether the
+/// spawned child has exited so we can short-circuit the 120s wait when
+/// Python crashed during startup (missing dep, port conflict, corrupt
+/// install, etc.).
+fn wait_for_backend(handle: &tauri::AppHandle) -> BackendStartup {
     let deadline = Instant::now() + Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS);
     while Instant::now() < deadline {
         if probe_backend() {
-            return true;
+            return BackendStartup::Ready;
+        }
+        // Acquire the backend mutex briefly to call try_wait(); we drop the
+        // guard before sleeping so kill_backend() can still acquire it on
+        // window close without contention.
+        if let Some(state) = handle.try_state::<BackendProcess>() {
+            let mut guard = match state.0.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(ref mut child) = guard.as_mut() {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        return BackendStartup::Exited { code: status.code() };
+                    }
+                    Ok(None) => {} // still running
+                    Err(err) => {
+                        log::warn!("try_wait on backend failed: {err}");
+                    }
+                }
+            }
         }
         thread::sleep(Duration::from_millis(HEALTH_CHECK_POLL_MS));
     }
-    false
+    BackendStartup::Timeout
 }
 
 fn probe_backend() -> bool {
@@ -198,10 +233,18 @@ pub fn run() {
                 .get_webview_window("main")
                 .expect("main window missing");
             let window_for_thread = main_window.clone();
+            let handle_for_thread = handle.clone();
             thread::spawn(move || {
                 // If the backend process never started, skip the 120s health
-                // check entirely and go straight to the error UI.
-                let ready = spawn_error.is_none() && wait_for_backend();
+                // check entirely and go straight to the error UI. Otherwise
+                // poll until either: the port responds, the Python child
+                // exits early (crash), or we hit the timeout.
+                let outcome = if spawn_error.is_some() {
+                    BackendStartup::Timeout // unused; we'll use spawn_error below
+                } else {
+                    wait_for_backend(&handle_for_thread)
+                };
+                let ready = spawn_error.is_none() && matches!(outcome, BackendStartup::Ready);
                 if ready {
                     // Backend is up. Navigate from the bundled placeholder
                     // (loading spinner) to the live FastAPI app.
@@ -215,10 +258,18 @@ pub fn run() {
                         Some(msg) => format!(
                             "Backend process could not be started: {msg}. Check backend.log inside the install directory for details."
                         ),
-                        None => format!(
-                            "The Python backend did not respond within {}s. Check backend.log inside the install directory for details, then reopen ArcReel.",
-                            HEALTH_CHECK_TIMEOUT_SECS
-                        ),
+                        None => match outcome {
+                            BackendStartup::Exited { code } => format!(
+                                "The Python backend exited unexpectedly (code {}) before opening port {}. Check backend.log inside the install directory for the traceback.",
+                                code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string()),
+                                BACKEND_PORT
+                            ),
+                            BackendStartup::Timeout => format!(
+                                "The Python backend did not respond within {}s. Check backend.log inside the install directory for details, then reopen ArcReel.",
+                                HEALTH_CHECK_TIMEOUT_SECS
+                            ),
+                            BackendStartup::Ready => unreachable!(),
+                        },
                     };
                     log::error!("{}", detail);
                     let detail_json = serde_json::to_string(&detail)
