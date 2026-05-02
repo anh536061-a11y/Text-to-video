@@ -3,7 +3,18 @@
 # This script is invoked by the GitHub Actions workflow on a `windows-latest`
 # runner. It produces the following layout under `desktop/resources/`:
 #
-#   python/                  uv-managed virtualenv with all backend deps
+#   python/                  Portable, fully relocatable Python distribution
+#                            (downloaded by `uv python install`, which uses
+#                            python-build-standalone). All site-packages are
+#                            installed directly into this interpreter — no
+#                            virtualenv is involved, because Windows venv
+#                            launchers hardcode the absolute path of the
+#                            base interpreter and would point at the CI
+#                            runner's `C:\hostedtoolcache\…` path on the end
+#                            user's machine. Installing into the portable
+#                            interpreter directly side-steps that problem.
+#       python.exe           main interpreter (at the root, not Scripts\)
+#       Lib/site-packages/   all backend deps
 #   app/                     copy of the backend source tree (server, lib, alembic, …)
 #       server/              FastAPI app
 #       lib/                 core library (PROJECT_ROOT = app/)
@@ -16,7 +27,7 @@
 #   ffmpeg/ffmpeg.exe        statically-linked Windows ffmpeg
 #
 # The Tauri shell at runtime runs:
-#   <install>\python\Scripts\python.exe -m uvicorn server.app:app --port 1241
+#   <install>\python\python.exe -m uvicorn server.app:app --port 1241
 # with cwd = <install>\app\, which makes PROJECT_ROOT = <install>\app\.
 #
 # Usage:
@@ -45,40 +56,80 @@ if (Test-Path $ResDir) {
 New-Item -ItemType Directory -Force -Path $ResDir, $AppDir, $FfDir | Out-Null
 
 # ---------------------------------------------------------------------------
-# 1. Backend Python venv via uv
+# 1. Portable Python interpreter via `uv python install` (python-build-standalone)
 # ---------------------------------------------------------------------------
-Write-Step "Creating backend virtualenv via uv sync (no-dev, no-install-project)"
-# We deliberately do NOT install the arcreel project itself into the venv
-# (--no-install-project). The backend source (server/, lib/, alembic/) is
-# copied into `app/` separately and Python finds it via `cwd` when we run
-# `python -m uvicorn server.app:app` with cwd = app/. This avoids the .pth
-# absolute-path problem that arises when copying an editable venv to a
-# different machine / install path.
+Write-Step "Downloading portable Python 3.12 via 'uv python install'"
+# python-build-standalone produces a fully relocatable Python distribution
+# (no hardcoded paths in launchers). This is what `uv python install` ships.
+# We download it into a scratch dir, find the install root, then copy the
+# whole tree to resources/python. The end user's interpreter therefore lives
+# entirely under <install>\python\ and does NOT depend on any path on the CI
+# runner ever existing on the user's machine.
+$UvPythonScratch = Join-Path $env:TEMP "arcreel-uv-python"
+if (Test-Path $UvPythonScratch) { Remove-Item -Recurse -Force $UvPythonScratch }
+New-Item -ItemType Directory -Force -Path $UvPythonScratch | Out-Null
+$env:UV_PYTHON_INSTALL_DIR = $UvPythonScratch
+
+& uv python install 3.12
+if ($LASTEXITCODE -ne 0) { throw "uv python install failed (exit $LASTEXITCODE)" }
+
+# `uv python install` lays out cpython-3.12.x-windows-x86_64-...\python.exe
+# inside its install dir. Find the directory that contains python.exe at root.
+$PythonInstall = Get-ChildItem -Path $UvPythonScratch -Directory -Recurse |
+    Where-Object { Test-Path (Join-Path $_.FullName "python.exe") } |
+    Select-Object -First 1
+if (-not $PythonInstall) {
+    throw "Could not locate python.exe inside $UvPythonScratch after 'uv python install'"
+}
+Write-Information "Found portable Python at $($PythonInstall.FullName)"
+
+Write-Step "Copying portable Python -> resources/python"
+Copy-Item -Recurse -Force $PythonInstall.FullName $PyDir
+$PythonExe = Join-Path $PyDir "python.exe"
+if (-not (Test-Path $PythonExe)) {
+    throw "Expected $PythonExe to exist after copy"
+}
+
+Write-Step "Exporting locked dependencies via uv export"
+# Use uv.lock as the single source of truth for pinned versions, but skip
+# the project itself (we're going to copy server/lib/alembic into app/
+# separately) and skip dev deps (tests, ruff, etc.).
+$ReqFile = Join-Path $env:TEMP "arcreel-requirements.txt"
 Push-Location $RepoRoot
 try {
-    if (Test-Path ".venv") { Remove-Item -Recurse -Force ".venv" }
-    & uv sync --no-dev --no-install-project --frozen
-    if ($LASTEXITCODE -ne 0) { throw "uv sync failed (exit $LASTEXITCODE)" }
+    & uv export --frozen --no-dev --no-emit-project --format requirements.txt --output-file $ReqFile
+    if ($LASTEXITCODE -ne 0) { throw "uv export failed (exit $LASTEXITCODE)" }
 } finally {
     Pop-Location
 }
 
-Write-Step "Copying .venv -> resources/python (this may take a while; ~400 MB)"
-Copy-Item -Recurse -Force (Join-Path $RepoRoot ".venv") $PyDir
+Write-Step "Installing backend deps directly into portable Python"
+# Use the bundled Python's own pip; this populates <python>\Lib\site-packages
+# with all runtime deps. No venv launcher, no hardcoded paths.
+& $PythonExe -m pip install --no-cache-dir --no-warn-script-location --upgrade pip
+if ($LASTEXITCODE -ne 0) { throw "pip self-upgrade failed (exit $LASTEXITCODE)" }
+& $PythonExe -m pip install --no-cache-dir --no-warn-script-location -r $ReqFile
+if ($LASTEXITCODE -ne 0) { throw "pip install -r requirements failed (exit $LASTEXITCODE)" }
 
-# Drop unused junk from the venv to shrink the bundle.
-$VenvJunkPaths = @(
-    (Join-Path $PyDir "Lib\site-packages\pip"),
+# Drop unused junk from site-packages to shrink the bundle.
+$JunkPaths = @(
     (Join-Path $PyDir "Lib\site-packages\setuptools"),
     (Join-Path $PyDir "Lib\site-packages\wheel"),
     (Join-Path $PyDir "Lib\site-packages\_distutils_hack"),
     (Join-Path $PyDir "Lib\site-packages\pkg_resources")
 )
-foreach ($p in $VenvJunkPaths) {
+foreach ($p in $JunkPaths) {
     if (Test-Path $p) { Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue }
 }
 Get-ChildItem -Path $PyDir -Recurse -Force -Include "__pycache__", "*.pyc" -ErrorAction SilentlyContinue | `
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+# Smoke test: verify the bundled interpreter can import a few critical deps
+# (catches platform-mismatch issues immediately instead of at runtime on the
+# user's machine).
+Write-Step "Smoke-testing bundled Python"
+& $PythonExe -c "import sys; print(sys.executable); import fastapi, uvicorn, sqlalchemy, alembic; print('imports OK')"
+if ($LASTEXITCODE -ne 0) { throw "Bundled Python smoke test failed (exit $LASTEXITCODE)" }
 
 # ---------------------------------------------------------------------------
 # 2. Backend source tree

@@ -51,8 +51,10 @@ fn spawn_backend(handle: &tauri::AppHandle) -> std::io::Result<Child> {
     let _ = std::fs::create_dir_all(app_dir.join("projects"));
     ensure_env_file(&app_dir);
 
+    // Bundled Python is a portable python-build-standalone install, NOT a
+    // venv. So python.exe lives at the root, not under Scripts\.
     let python_exe = if cfg!(target_os = "windows") {
-        python_dir.join("Scripts").join("python.exe")
+        python_dir.join("python.exe")
     } else {
         python_dir.join("bin").join("python")
     };
@@ -61,7 +63,8 @@ fn spawn_backend(handle: &tauri::AppHandle) -> std::io::Result<Child> {
     log::info!("app_dir    = {}", app_dir.display());
     log::info!("ffmpeg_dir = {}", ffmpeg_dir.display());
 
-    // Build PATH so backend subprocess can locate ffmpeg and python's Scripts/.
+    // Build PATH so backend subprocess can locate ffmpeg and pip-installed
+    // scripts (e.g. uvicorn.exe, though we always invoke via -m).
     let path_sep = if cfg!(target_os = "windows") { ";" } else { ":" };
     let scripts_dir = if cfg!(target_os = "windows") {
         python_dir.join("Scripts")
