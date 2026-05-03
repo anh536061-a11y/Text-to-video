@@ -80,6 +80,9 @@ htmlcov/
 
 # File locks (project_manager 原子写产物)
 **/*.lock
+# But Cargo.lock for the desktop wrapper crate must be committed for
+# reproducible builds (it's an application crate, not a library).
+!desktop/src-tauri/Cargo.lock
 
 # Docker runtime data
 claude_data/
