@@ -146,35 +146,62 @@ enum BackendStartup {
     Timeout,
 }
 
+/// If the spawned child has already exited, return its exit code so the
+/// caller can surface a clearer error than a 120s timeout. Returns `None`
+/// if the child is still running, the state hasn't been registered yet, or
+/// the call to `try_wait()` itself errored (in which case we just log and
+/// pretend it's still running so the loop keeps polling).
+///
+/// We acquire the mutex briefly and drop the guard before returning so
+/// `kill_backend()` can still take it on window close without contention.
+fn check_child_exited(handle: &tauri::AppHandle) -> Option<Option<i32>> {
+    let state = handle.try_state::<BackendProcess>()?;
+    let mut guard = match state.0.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let child = guard.as_mut()?;
+    match child.try_wait() {
+        Ok(Some(status)) => Some(status.code()),
+        Ok(None) => None,
+        Err(err) => {
+            log::warn!("try_wait on backend failed: {err}");
+            None
+        }
+    }
+}
+
 /// Poll for the backend HTTP port. While polling, also check whether the
 /// spawned child has exited so we can short-circuit the 120s wait when
 /// Python crashed during startup (missing dep, port conflict, corrupt
 /// install, etc.).
+///
+/// The order of checks matters: we MUST verify the spawned child is still
+/// alive *before* trusting a successful TCP probe. Otherwise, if a foreign
+/// service (e.g. a previous ArcReel instance, or any unrelated app) is
+/// already bound to port 1241, our newly-spawned Python child will crash
+/// trying to bind, but `probe_backend()` will happily connect to the
+/// foreign service and return Ready — silently navigating the WebView at
+/// somebody else's app.
 fn wait_for_backend(handle: &tauri::AppHandle) -> BackendStartup {
     let deadline = Instant::now() + Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS);
     while Instant::now() < deadline {
-        if probe_backend() {
-            return BackendStartup::Ready;
+        // 1. Did our child already die? Bail out with the exit code.
+        if let Some(code) = check_child_exited(handle) {
+            return BackendStartup::Exited { code };
         }
-        // Acquire the backend mutex briefly to call try_wait(); we drop the
-        // guard before sleeping so kill_backend() can still acquire it on
-        // window close without contention.
-        if let Some(state) = handle.try_state::<BackendProcess>() {
-            let mut guard = match state.0.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if let Some(ref mut child) = guard.as_mut() {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        return BackendStartup::Exited { code: status.code() };
-                    }
-                    Ok(None) => {} // still running
-                    Err(err) => {
-                        log::warn!("try_wait on backend failed: {err}");
-                    }
-                }
+        // 2. Is the port responsive? Only NOW is it safe to call this
+        //    Ready: the child was alive at the start of this iteration,
+        //    so any service answering on port 1241 is presumably ours.
+        if probe_backend() {
+            // Re-check exit status one more time before declaring success,
+            // closing the (tiny) window where the child might have exited
+            // between step 1 and step 2 with a stale-but-still-listening
+            // socket from a foreign service.
+            if let Some(code) = check_child_exited(handle) {
+                return BackendStartup::Exited { code };
             }
+            return BackendStartup::Ready;
         }
         thread::sleep(Duration::from_millis(HEALTH_CHECK_POLL_MS));
     }
