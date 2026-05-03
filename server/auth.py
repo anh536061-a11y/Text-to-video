@@ -193,9 +193,12 @@ def ensure_auth_password(env_path: str | None = None) -> str:
         env_path = str(PROJECT_ROOT / ".env")
 
     env_file = Path(env_path)
+    # 显式指定 UTF-8：.env / .env.example 中可能包含中文/越南文注释，
+    # 在 Windows 上 read_text() / open() 默认使用系统 locale (cp1252 / cp1258)
+    # 解码会报 UnicodeDecodeError，导致 lifespan 启动失败。
     try:
         if env_file.exists():
-            lines = env_file.read_text().splitlines()
+            lines = env_file.read_text(encoding="utf-8").splitlines()
             new_lines = []
             found = False
             for line in lines:
@@ -208,12 +211,12 @@ def ensure_auth_password(env_path: str | None = None) -> str:
                 new_lines.append(f"AUTH_PASSWORD={password}")
             new_content = "\n".join(new_lines) + "\n"
             # 使用原地写入（truncate + write）保留 inode，兼容 Docker bind mount
-            with open(env_file, "r+") as f:
+            with open(env_file, "r+", encoding="utf-8") as f:
                 f.seek(0)
                 f.write(new_content)
                 f.truncate()
         else:
-            env_file.write_text(f"AUTH_PASSWORD={password}\n")
+            env_file.write_text(f"AUTH_PASSWORD={password}\n", encoding="utf-8")
     except OSError:
         logger.warning("无法写入 .env 文件: %s", env_path)
 
